@@ -10,6 +10,7 @@ from .base import BaseSearchProvider, SearchResult
 from ..utils import search_prompt, fetch_prompt, url_describe_prompt, rank_sources_prompt
 from ..logger import log_info
 from ..config import config
+from ..sources import sanitize_answer_text
 
 
 def get_local_time_info() -> str:
@@ -173,14 +174,12 @@ class GrokSearchProvider(BaseSearchProvider):
 
     async def _parse_streaming_response(self, response, ctx=None) -> str:
         content = ""
-        full_body_buffer = [] 
+        parsed_events = []
         
         async for line in response.aiter_lines():
             line = line.strip()
             if not line:
                 continue
-            
-            full_body_buffer.append(line)
 
             # 兼容 "data: {...}" 和 "data:{...}" 两种 SSE 格式
             if line.startswith("data:"):
@@ -190,6 +189,7 @@ class GrokSearchProvider(BaseSearchProvider):
                     # 去掉 "data:" 前缀，并去除可能的空格
                     json_str = line[5:].lstrip()
                     data = json.loads(json_str)
+                    parsed_events.append(data)
                     choices = data.get("choices", [])
                     if choices and len(choices) > 0:
                         delta = choices[0].get("delta", {})
@@ -198,16 +198,29 @@ class GrokSearchProvider(BaseSearchProvider):
                 except (json.JSONDecodeError, IndexError):
                     continue
                 
-        if not content and full_body_buffer:
-            try:
-                full_text = "".join(full_body_buffer)
-                data = json.loads(full_text)
-                if "choices" in data and len(data["choices"]) > 0:
-                    message = data["choices"][0].get("message", {})
-                    content = message.get("content", "")
-            except json.JSONDecodeError:
-                pass
+        if not content and parsed_events:
+            for data in reversed(parsed_events):
+                choices = data.get("choices", [])
+                if not choices:
+                    continue
+                message = choices[0].get("message", {})
+                message_content = message.get("content", "")
+                if isinstance(message_content, str) and message_content.strip():
+                    content = message_content
+                    break
+                if isinstance(message_content, list):
+                    texts = []
+                    for item in message_content:
+                        if isinstance(item, dict):
+                            text = item.get("text")
+                            if isinstance(text, str) and text.strip():
+                                texts.append(text.strip())
+                    if texts:
+                        content = "\n".join(texts)
+                        break
         
+        content = sanitize_answer_text(content)
+
         await log_info(ctx, f"content: {content}", config.debug_enabled)
 
         return content

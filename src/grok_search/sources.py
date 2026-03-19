@@ -11,6 +11,7 @@ from .utils import extract_unique_urls
 
 
 _MD_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_THINK_BLOCK_PATTERN = re.compile(r"(?is)<think>.*?</think>")
 _SOURCES_HEADING_PATTERN = re.compile(
     r"(?im)^"
     r"(?:#{1,6}\s*)?"
@@ -67,8 +68,15 @@ def merge_sources(*source_lists: list[dict]) -> list[dict]:
     return merged
 
 
+def sanitize_answer_text(text: str) -> str:
+    cleaned = _THINK_BLOCK_PATTERN.sub("", text or "")
+    cleaned = cleaned.replace("<think>", "").replace("</think>", "")
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
-    raw = (text or "").strip()
+    raw = sanitize_answer_text(text)
     if not raw:
         return "", []
 

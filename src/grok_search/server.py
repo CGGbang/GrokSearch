@@ -15,13 +15,25 @@ try:
     from grok_search.providers.grok import GrokSearchProvider
     from grok_search.logger import log_info
     from grok_search.config import config
-    from grok_search.sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
+    from grok_search.sources import (
+        SourcesCache,
+        merge_sources,
+        new_session_id,
+        sanitize_answer_text,
+        split_answer_and_sources,
+    )
     from grok_search.planning import engine as planning_engine, _split_csv
 except ImportError:
     from .providers.grok import GrokSearchProvider
     from .logger import log_info
     from .config import config
-    from .sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
+    from .sources import (
+        SourcesCache,
+        merge_sources,
+        new_session_id,
+        sanitize_answer_text,
+        split_answer_and_sources,
+    )
     from .planning import engine as planning_engine, _split_csv
 
 import asyncio
@@ -69,6 +81,21 @@ async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
     async with _AVAILABLE_MODELS_LOCK:
         _AVAILABLE_MODELS_CACHE[key] = models
     return models
+
+
+def _build_web_search_content(
+    answer: str,
+    all_sources: list[dict],
+    grok_error: str | None,
+) -> str:
+    cleaned = sanitize_answer_text(answer)
+    if cleaned:
+        return cleaned
+    if grok_error:
+        return f"Grok answer generation failed: {grok_error}"
+    if all_sources:
+        return "Search completed, but answer generation returned empty content. Use get_sources(session_id) to inspect the sources."
+    return "Search completed, but no answer content was returned."
 
 
 def _extra_results_to_sources(
@@ -164,11 +191,11 @@ async def web_search(
             tavily_count = extra_sources
 
     # 并行执行搜索任务
-    async def _safe_grok() -> str:
+    async def _safe_grok() -> tuple[str, str | None]:
         try:
-            return await grok_provider.search(query, platform)
-        except Exception:
-            return ""
+            return await grok_provider.search(query, platform), None
+        except Exception as e:
+            return "", f"{type(e).__name__}: {e}"
 
     async def _safe_tavily() -> list[dict] | None:
         try:
@@ -192,7 +219,8 @@ async def web_search(
 
     gathered = await asyncio.gather(*coros)
 
-    grok_result: str = gathered[0] or ""
+    grok_result, grok_error = gathered[0]
+    grok_result = grok_result or ""
     tavily_results: list[dict] | None = None
     firecrawl_results: list[dict] | None = None
     idx = 1
@@ -205,9 +233,10 @@ async def web_search(
     answer, grok_sources = split_answer_and_sources(grok_result)
     extra = _extra_results_to_sources(tavily_results, firecrawl_results)
     all_sources = merge_sources(grok_sources, extra)
+    content = _build_web_search_content(answer, all_sources, grok_error)
 
     await _SOURCES_CACHE.set(session_id, all_sources)
-    return {"session_id": session_id, "content": answer, "sources_count": len(all_sources)}
+    return {"session_id": session_id, "content": content, "sources_count": len(all_sources)}
 
 
 @mcp.tool(
